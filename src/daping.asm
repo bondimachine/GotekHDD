@@ -213,12 +213,19 @@ do_bench:
         call    da_begin
         call    da_read_status
         jc      bench_fail
-        xor     ax, ax
+        mov     ax, BDA_SEG
         mov     es, ax
-        mov     ax, [es:BDA_TICKS+2]    ; wait for a tick edge
-        mov     bx, [es:BDA_TICKS]
+        mov     bx, [es:BDA_TICKS]      ; wait for a tick edge (bounded:
+        mov     dx, 1024                ; a dead timer must not hang us)
+        xor     cx, cx
 .sync:  cmp     bx, [es:BDA_TICKS]
-        je      .sync
+        jne     .ticked
+        loop    .sync
+        dec     dx
+        jnz     .sync
+        mov     al, 'T'                 ; warn: timer never moved
+        call    putc
+.ticked:
         mov     ax, [es:BDA_TICKS]
         mov     [t0], ax
         mov     word [cur_lba], 0
@@ -239,26 +246,27 @@ do_bench:
         jc      bench_fail_pop
         add     word [cur_lba], 8
         adc     word [cur_lba+2], 0
+        mov     al, '.'                 ; checkpoint: window done
+        call    putc
         pop     cx
         loop    .loop
-        xor     ax, ax
+        mov     ax, BDA_SEG
         mov     es, ax
         mov     ax, [es:BDA_TICKS]
         sub     ax, [t0]                ; elapsed ticks (18.2/s)
         jnz     .nonzero
         inc     ax                      ; avoid divide-by-zero under
 .nonzero:                               ; emulators (instant transfers)
+        mov     [t0], ax                ; da_end clobbers AX
         call    da_end
-        push    ax
         mov     dx, msg_ticks
         call    puts
-        pop     ax
-        push    ax
+        mov     ax, [t0]
         call    put_dec16
         call    crlf
         mov     dx, msg_rate
         call    puts
-        pop     cx                      ; ticks
+        mov     cx, [t0]                ; ticks
         mov     ax, 11651               ; 64KB*18.2t/s -> KB/s x10
         xor     dx, dx
         div     cx
@@ -440,11 +448,18 @@ puts:                                   ; DX -> '$'-terminated string
         ret
 
 putc:                                   ; AL = char
+        push    ax
+        push    bx
         push    dx
         mov     dl, al
         mov     ah, 0x02
         int     0x21
+        mov     ah, 0x68                ; commit stdout so redirected
+        mov     bx, 1                   ; output survives a later hang
+        int     0x21
         pop     dx
+        pop     bx
+        pop     ax
         ret
 
 crlf:

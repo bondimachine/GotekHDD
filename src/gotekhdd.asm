@@ -297,7 +297,7 @@ card_io:
         je      .no_pre
         push    ds
         pop     es
-        mov     di, bounce_buf
+        mov     di, [bounce_off]
         lds     si, [rw_buf]
         mov     cx, SEC_SZ/2
         rep movsw
@@ -312,7 +312,7 @@ card_io:
         je      .user_buf
         push    ds
         pop     es
-        mov     bx, bounce_buf
+        mov     bx, [bounce_off]
         jmp     .xfer
 .user_buf:
         les     bx, [rw_buf]
@@ -324,28 +324,30 @@ card_io:
         jc      .retry
         mov     ax, [da_buf+DAS_LBA_BASE]
         cmp     ax, [io_lba]
-        jne     .retry
+        jne     .vretry
         mov     ax, [da_buf+DAS_LBA_BASE+2]
         cmp     ax, [io_lba+2]
-        jne     .retry
+        jne     .vretry
         cmp     byte [rw_op], 3
         jne     .read_done
         mov     al, [da_buf+DAS_WRITE_CNT]
         cmp     al, [io_wrcnt]
-        jne     .retry
+        jne     .vretry
         clc
         ret
 .read_done:
         ; bounce-buffered read: copy out to the user buffer
         cmp     byte [rw_bounce], 0
         je      .ok
-        mov     si, bounce_buf
+        mov     si, [bounce_off]
         les     di, [rw_buf]
         mov     cx, SEC_SZ/2
         rep movsw
 .ok:
         clc
         ret
+.vretry:
+        mov     ah, 0xFE                ; verify mismatch, no BIOS code
 .retry:
         mov     [da_err], ah
         dec     byte [io_tries]
@@ -398,7 +400,10 @@ map_error:
 %include "da.asm"
 %include "extent.asm"
 
-bounce_buf: times SEC_SZ db 0
+; 1KB bounce area: INIT points bounce_off at whichever 512-byte half
+; does not cross a physical 64KB DMA boundary (depends on load address).
+bounce_off: dw bounce_buf
+bounce_buf: times SEC_SZ*2 db 0
 
 ; ---------------------------------------------------------------------
 ; Everything below this point is discarded after INIT.

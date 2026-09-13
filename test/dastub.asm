@@ -96,13 +96,17 @@ hook13:
         pop     bx
         mov     ax, [cs:v_ax]
         mov     ah, [cs:v_err]
-        or      ah, ah
-        jnz     .fail
-        clc
-        retf    2                       ; keep our flags
+        push    bp                      ; set CF in the caller's stacked
+        mov     bp, sp                  ; FLAGS and iret, preserving the
+        or      ah, ah                  ; caller's IF (a retf 2 would
+        jnz     .fail                   ; return with interrupts off!)
+        and     word [bp+6], 0xFFFE
+        pop     bp
+        iret
 .fail:
-        stc
-        retf    2
+        or      word [bp+6], 1
+        pop     bp
+        iret
 .chain:
         jmp     far [cs:old13]
 

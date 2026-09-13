@@ -12,6 +12,17 @@ init:
         mov     dx, i_banner
         call    iputs
 
+        ; pick the bounce-buffer half that cannot cross a 64KB physical
+        ; DMA boundary at this load address
+        mov     ax, cs
+        mov     cl, 4
+        shl     ax, cl
+        add     ax, bounce_buf          ; phys & 0xFFFF
+        cmp     ax, 0x10000-SEC_SZ
+        jbe     .bounce_ok
+        mov     word [bounce_off], bounce_buf+SEC_SZ
+.bounce_ok:
+
         mov     al, [es:bx+REQ_DRIVE]   ; drive letter for the summary
         add     al, 'A'
         mov     [i_drive], al

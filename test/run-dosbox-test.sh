@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 BAT="$1"; shift || true
 TD=build/testdir
 rm -rf "$TD"; mkdir -p "$TD"
-cp build/DAPING.COM build/DASTUB.COM build/GOTEKHDD.SYS "$TD"/
+cp build/DAPING.COM build/DASTUB.COM build/DRVTEST.COM build/GOTEKHDD.SYS "$TD"/
 cp build/card.img "$TD"/CARD.IMG
 cp "$BAT" "$TD"/TEST.BAT
 for f in "$@"; do cp "$f" "$TD"/; done

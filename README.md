@@ -49,6 +49,23 @@ check that your BIOS can reach the Direct Access track at all, and
 `DAPING /B` for a throughput estimate. `DAPING /M` reports which BIOS
 fixups your machine needs if the plain probe fails.
 
+Firmware-side requirements: FlashFloppy in Shugart-target firmware with
+a FAT-formatted SD card (Direct Access is unavailable on the pico2's
+internal littlefs store), and `MAX-CYL` in `FF.CFG` left at its default
+of 255 — the escape mechanism is literally a seek to cylinder 255.
+
+### Hardware bring-up order
+
+1. `DAPING` — status probe. Must show the firmware version.
+2. `DAPING /M` — note which fixup rows PASS on your BIOS.
+3. `DAPING /L 0` — dumps the card's MBR through the DA window.
+4. `DAPING /B` — read throughput (each dot is one 4KB window).
+5. `DRVTEST` / `DRVTEST /S 0 /N 2048` — full driver logic without
+   mounting (compare the checksum with `test/verify-sum.py`).
+6. `DEVICE=GOTEKHDD.SYS` in CONFIG.SYS, reboot, `DIR` the new drive.
+7. Interleave: `DIR A:` then the new drive again — both must keep
+   working.
+
 ## Performance
 
 The floppy bus is the bus: 250 kbit/s MFM, 4KB per disk revolution at
