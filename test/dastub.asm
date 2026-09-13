@@ -30,6 +30,9 @@ start:
 old13:      dd 0
 xms_entry:  dd 0
 xms_handle: dw 0
+use_xms:    db 0                ; 0 = file-backed mode (no XMS/8088)
+fhandle:    dw 0                ; file mode: open handle on the image
+stub_psp:   dw 0                ; file mode: our PSP for handle access
 img_secs:   dd 0                ; image size in sectors
 lba_base:   dd 0
 cmd_cnt:    db 0
@@ -166,7 +169,7 @@ data_window:
         pop     cx
         mov     [xmv_len], ax
         mov     word [xmv_len+2], 0
-        ; XMS byte offset = lba * 512
+        ; image byte offset = lba * 512
         mov     ax, [v_lba]
         mov     dx, [v_lba+2]
         push    cx
@@ -175,6 +178,8 @@ data_window:
         rcl     dx, 1
         loop    .sh
         pop     cx
+        cmp     byte [use_xms], 0
+        je      .file
         ; direction
         cmp     byte [v_ax+1], 3
         je      .to_xms
@@ -206,11 +211,55 @@ data_window:
         pop     cx
         or      ax, ax
         jz      .moverr
+.xfer_ok:
         cmp     byte [v_ax+1], 3
         jne     .done
         add     [write_cnt], ch         ; one bump per written sector
 .done:
         ret
+
+        ; ---- file-backed mode (no XMS; 8088-class runs) ----
+        ; Only safe when INT 13h is invoked from normal program context
+        ; (DAPING/DRVTEST), since it re-enters DOS for file I/O.
+.file:
+        sti
+        mov     si, ax                  ; SI:DI = byte offset
+        mov     di, dx
+        push    cx                      ; count in CH
+        mov     ah, 0x51                ; save caller's PSP, switch to
+        int     0x21                    ; ours so the handle resolves
+        push    bx
+        mov     bx, [stub_psp]
+        mov     ah, 0x50
+        int     0x21
+        mov     bx, [fhandle]           ; seek to the window
+        mov     cx, di
+        mov     dx, si
+        mov     ax, 0x4200
+        int     0x21
+        jc      .filerr
+        mov     ah, [v_ax+1]            ; 2/3 -> 3Fh read / 40h write
+        add     ah, 0x3D
+        mov     bx, [fhandle]
+        mov     cx, [xmv_len]
+        mov     dx, [v_bx]
+        push    ds
+        mov     ds, [cs:v_es]           ; user buffer is DS:DX
+        int     0x21
+        pop     ds
+        jc      .filerr
+        cmp     ax, [xmv_len]
+        jne     .filerr
+        pop     bx                      ; restore caller's PSP
+        mov     ah, 0x50
+        int     0x21
+        pop     cx
+        jmp     .xfer_ok
+.filerr:
+        pop     bx
+        mov     ah, 0x50
+        int     0x21
+        pop     cx
 .moverr:
         mov     byte [v_err], 0x20      ; controller failure
         ret
@@ -318,22 +367,12 @@ install:
 .cp_done:
         mov     byte [di], 0
 
-        ; XMS present?
-        mov     ax, 0x4300
-        int     0x2F
-        cmp     al, 0x80
-        je      .xms_ok
-        mov     dx, s_noxms
-        jmp     die
-.xms_ok:
-        mov     ax, 0x4310
-        int     0x2F
-        mov     [xms_entry], bx
-        mov     [xms_entry+2], es
-
-        ; open the card image
-        mov     ax, 0x3D00
+        ; open the card image read-write (read-only as a fallback)
+        mov     ax, 0x3D02
         mov     dx, fname
+        int     0x21
+        jnc     .opened
+        mov     ax, 0x3D00
         int     0x21
         jnc     .opened
         mov     dx, s_nofile
@@ -357,6 +396,24 @@ install:
         xor     cx, cx
         xor     dx, dx
         int     0x21
+
+        ; XMS present? If not (e.g. an 8088-class CPU), stay file-backed.
+        mov     ax, 0x4300
+        int     0x2F
+        cmp     al, 0x80
+        je      .have_xms
+        mov     ah, 0x51                ; remember our PSP so the hook
+        int     0x21                    ; can reach the open handle
+        mov     [stub_psp], bx
+        mov     dx, s_filemode
+        call    puts
+        jmp     .hook
+.have_xms:
+        mov     byte [use_xms], 1
+        mov     ax, 0x4310
+        int     0x2F
+        mov     [xms_entry], bx
+        mov     [xms_entry+2], es
 
         ; allocate XMS: KB = (size >> 10) + 1; 16-bit KB count caps the
         ; image at just under 64MB
@@ -425,6 +482,7 @@ install:
         mov     ah, 0x3E
         int     0x21
 
+.hook:
         ; hook INT 13h
         mov     ax, 0x3513
         int     0x21
@@ -454,7 +512,7 @@ puts:
 
 s_banner:  db 'DASTUB - Direct Access track emulator', 13, 10, '$'
 s_usage:   db 'usage: DASTUB CARD.IMG', 13, 10, '$'
-s_noxms:   db 'error: no XMS driver (HIMEM) present', 13, 10, '$'
+s_filemode: db 'no XMS: file-backed mode (DAPING/DRVTEST only)', 13, 10, '$'
 s_nofile:  db 'error: cannot open card image', 13, 10, '$'
 s_noalloc: db 'error: XMS allocation failed', 13, 10, '$'
 s_rderr:   db 'error: reading card image', 13, 10, '$'
@@ -462,7 +520,6 @@ s_toobig:  db 'error: card image too large (max 63MB)', 13, 10, '$'
 s_done:    db 'installed: INT 13h drive 0 cyl>=254 now emulated', 13, 10, '$'
 
 fname:     times 80 db 0
-fhandle:   dw 0
 fsize:     dd 0
 xoff:      dd 0
 iobuf:

@@ -27,6 +27,9 @@ init:
         add     al, 'A'
         mov     [i_drive], al
 
+        call    da_autofix              ; XT vs AT BIOS fixup set
+                                        ; (overridable with /X and /A)
+
         ; --- copy and parse the CONFIG.SYS command line ---------------
         push    ds
         lds     si, [es:bx+REQ_CMDLINE]
@@ -162,6 +165,37 @@ init:
         mov     [i_rootclus], ax
         mov     ax, [i_sec+0x2E]
         mov     [i_rootclus+2], ax
+
+        ; reject FAT12 cards: the chain walker reads 16-bit entries.
+        ; clusters = (total - (data_start - volbase)) >> spc_shift
+        cmp     byte [i_fat32], 0
+        jne     .fat_ok
+        mov     ax, [i_sec+19]          ; total sectors (16-bit field)
+        xor     dx, dx
+        or      ax, ax
+        jnz     .tot
+        mov     ax, [i_sec+0x20]        ; 32-bit total
+        mov     dx, [i_sec+0x22]
+.tot:
+        sub     ax, [i_datastart]
+        sbb     dx, [i_datastart+2]
+        add     ax, [i_volbase]
+        adc     dx, [i_volbase+2]
+        mov     cl, [i_spc_shift]
+        or      cl, cl
+        jz      .noshr2
+.shr2:  shr     dx, 1
+        rcr     ax, 1
+        dec     cl
+        jnz     .shr2
+.noshr2:
+        or      dx, dx
+        jnz     .fat_ok
+        cmp     ax, 4085
+        jae     .fat_ok
+        mov     dx, i_e_fat12
+        jmp     init_fail
+.fat_ok:
 
         ; --- find the image file in the root directory ----------------
         call    find_file
@@ -323,6 +357,16 @@ parse_line:
         mov     byte [verbose], 1
         jmp     .scan
 .not_v:
+        cmp     al, 'A'                 ; force full (AT) BIOS fixups
+        jne     .not_a
+        mov     byte [da_fixmask], FIX_ALL
+        jmp     .scan
+.not_a:
+        cmp     al, 'X'                 ; force XT fixups (DPT only)
+        jne     .not_x
+        mov     byte [da_fixmask], FIX_XT
+        jmp     .scan
+.not_x:
         cmp     al, 'U'
         jne     .not_u
         lodsb                           ; expect '=' or ':'
@@ -791,6 +835,7 @@ i_banner:   db 13, 10, 'GotekHDD 0.1 - FlashFloppy Direct Access disk', 13, 10, 
 i_e_noda:   db 'GotekHDD: no Direct Access track (FlashFloppy with SD card required)', 13, 10, '$'
 i_e_io:     db 'GotekHDD: card I/O error', 13, 10, '$'
 i_e_nofat:  db 'GotekHDD: no FAT volume on the card', 13, 10, '$'
+i_e_fat12:  db 'GotekHDD: FAT12 card not supported - use FAT16/FAT32', 13, 10, '$'
 i_e_noimg:  db 'GotekHDD: image file not found in card root directory', 13, 10, '$'
 i_e_frag:   db 'GotekHDD: image too fragmented - re-copy it to the card', 13, 10, '$'
 i_e_chain:  db 'GotekHDD: bad FAT chain for image file', 13, 10, '$'

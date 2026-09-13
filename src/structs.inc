@@ -58,6 +58,9 @@ FIX_DPT         equ 0x01        ; point INT 1Eh at our DPT
 FIX_MEDIA       equ 0x02        ; force 40:90 media state
 FIX_RATE        equ 0x04        ; force 40:8B data rate
 FIX_ALL         equ 0x07
+FIX_XT          equ FIX_DPT     ; 40:8B/40:90 do not exist pre-AT; the
+                                ; XT floppy adapter is 250kbps-only, so
+                                ; the DPT swap is the only fixup needed
 
 ; DOS device driver request packet (offsets from ES:BX)
 REQ_LEN         equ 0

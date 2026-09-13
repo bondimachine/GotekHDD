@@ -20,6 +20,7 @@
 
 start:
         cld
+        call    da_autofix
         call    parse_args
         mov     al, [mode]
         cmp     al, 'M'
@@ -36,6 +37,11 @@ start:
 do_status:
         mov     dx, msg_probing
         call    puts
+        mov     dx, msg_fixups
+        call    puts
+        mov     al, [da_fixmask]
+        call    put_hex8
+        call    crlf
         call    da_begin
         call    da_read_status
         pushf
@@ -522,6 +528,7 @@ cur_lba:    dd 0
 want_cmdcnt: db 0
 
 msg_probing: db 'GotekHDD DAPING 0.1 - probing Direct Access track...', 13, 10, '$'
+msg_fixups: db 'BIOS fixups   : $'
 msg_ok:     db 'Direct Access OK (HxCFEDA signature found)', 13, 10, '$'
 msg_fw:     db 'Firmware      : $'
 msg_nrsec:  db 'Window sectors: $'

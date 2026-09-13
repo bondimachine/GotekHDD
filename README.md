@@ -50,9 +50,25 @@ check that your BIOS can reach the Direct Access track at all, and
 fixups your machine needs if the plain probe fails.
 
 Firmware-side requirements: FlashFloppy in Shugart-target firmware with
-a FAT-formatted SD card (Direct Access is unavailable on the pico2's
+a FAT16/FAT32 SD card (Direct Access is unavailable on the pico2's
 internal littlefs store), and `MAX-CYL` in `FF.CFG` left at its default
 of 255 — the escape mechanism is literally a seek to cylinder 255.
+
+### 8088/XT machines
+
+Everything is assembled for the 8086/8088 instruction set (NASM
+`cpu 8086`) and the test suite runs on DOSBox-X's emulated 8086. The
+driver reads the BIOS model byte at F000:FFFE: on PC/XT-class machines
+it applies only the diskette-parameter-table fixup, since the AT
+diskette-state bytes (40:8B data rate, 40:90 media state) don't exist
+pre-AT and the XT floppy adapter is 250kbps-only anyway. Override with
+`/A` (force full AT fixups) or `/X` (force XT set) on the DEVICE line
+if the auto-detection guesses wrong on your clone BIOS.
+
+DASTUB (the test-only DA emulator) uses XMS when available and falls
+back to DOS file I/O without it, so the test suite also runs on
+8088-class configurations — file mode is only safe under DAPING and
+DRVTEST, not with a DOS-mounted GotekHDD drive.
 
 ### Hardware bring-up order
 

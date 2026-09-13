@@ -16,6 +16,33 @@
 %include "structs.inc"
 
 ; ---------------------------------------------------------------------
+; da_autofix: choose the default fixup set for this machine. The AT
+; diskette-state bytes (40:8B data rate, 40:90 media state) only exist
+; on AT-class and later BIOSes; on PC/XT-class machines (BIOS model
+; byte FF/FE/FD/FB at F000:FFFE) they are reserved BDA bytes and the
+; floppy adapter is 250kbps-only anyway, so only the DPT is patched.
+; Clobbers AX, ES.
+da_autofix:
+        mov     ax, 0xF000
+        mov     es, ax
+        mov     al, [es:0xFFFE]         ; BIOS model byte
+        cmp     al, 0xFF                ; PC
+        je      .xt
+        cmp     al, 0xFE                ; XT
+        je      .xt
+        cmp     al, 0xFD                ; PCjr
+        je      .xt
+        cmp     al, 0xFB                ; XT (later BIOS)
+        je      .xt
+        cmp     al, 0xF9                ; Convertible (8088)
+        je      .xt
+        mov     byte [da_fixmask], FIX_ALL
+        ret
+.xt:
+        mov     byte [da_fixmask], FIX_XT
+        ret
+
+; ---------------------------------------------------------------------
 ; da_begin: save BIOS floppy state and apply fixups per [da_fixmask].
 ; Clobbers AX, ES. Not reentrant.
 da_begin:
@@ -37,18 +64,18 @@ da_begin:
         mov     es, ax
         mov     bl, [da_unit]
         xor     bh, bh
-        mov     al, [es:bx+BDA_MEDIA0]  ; save media state / rate / cyl
+        test    byte [da_fixmask], FIX_MEDIA
+        jz      .no_media
+        mov     al, [es:bx+BDA_MEDIA0]  ; save + force media state
         mov     [da_old_media], al
         mov     al, [es:bx+BDA_CYL0]
         mov     [da_old_cyl], al
-        mov     al, [es:BDA_RATE]
-        mov     [da_old_rate], al
-        test    byte [da_fixmask], FIX_MEDIA
-        jz      .no_media
         mov     byte [es:bx+BDA_MEDIA0], MEDIA_DD_EST
 .no_media:
         test    byte [da_fixmask], FIX_RATE
         jz      .no_rate
+        mov     al, [es:BDA_RATE]       ; save + force data rate
+        mov     [da_old_rate], al
         mov     byte [es:BDA_RATE], RATE_250
 .no_rate:
         pop     bx
@@ -73,10 +100,16 @@ da_end:
         mov     es, ax
         mov     bl, [da_unit]
         xor     bh, bh
+        test    byte [da_fixmask], FIX_MEDIA
+        jz      .no_media
         mov     al, [da_old_media]
         mov     [es:bx+BDA_MEDIA0], al
+.no_media:
+        test    byte [da_fixmask], FIX_RATE
+        jz      .no_rate
         mov     al, [da_old_rate]
         mov     [es:BDA_RATE], al
+.no_rate:
         pop     bx
         ret
 
