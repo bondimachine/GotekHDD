@@ -184,8 +184,9 @@ da_set_lba:
         mov     [da_param], ax
         mov     [da_param+2], dx
         mov     byte [da_param+4], 0
-        mov     byte [da_param+5], 0    ; default sector count (8)
-        mov     al, DA_CMD_SET_LBA
+        mov     al, [da_nsec]           ; window size for the next transfer:
+        mov     [da_param+5], al        ; the firmware sizes the DA track to
+        mov     al, DA_CMD_SET_LBA      ; exactly this many data sectors
         jmp     da_command
 
 ; ---------------------------------------------------------------------
@@ -229,6 +230,8 @@ da_data:
 ; Data
 da_sig:         db 'HxCFEDA', 0
 da_unit:        db 0                    ; BIOS drive number
+da_nsec:        db DA_NSEC              ; sectors per DA transfer (-> param[5]);
+                                        ; the driver raises this to its window
 da_fixmask:     db FIX_ALL
 da_old_dpt:     dd 0
 da_old_media:   db 0
@@ -240,9 +243,12 @@ da_tries:       db 0
 da_err:         db 0
 da_retry_cnt:   dw 0                    ; failed INT 13h attempts (total)
 
-; Diskette parameter table for the DA track: 512-byte sectors, EOT 9
-; (IDs 0..8), MFM DD gap. Values otherwise standard 3.5" table.
-da_dpt:         db 0xDF, 0x02, 0x25, 0x02, 9, 0x2A, 0xFF, 0x50
+; Diskette parameter table for the DA track: 512-byte sectors, MFM DD
+; gap, EOT = DA_WIN_MAX so a multi-sector INT 13h op is not truncated
+; below our largest window (the FDC still stops at the DMA byte count,
+; so a smaller request reads only what it asked for). Otherwise the
+; standard 3.5" table.
+da_dpt:         db 0xDF, 0x02, 0x25, 0x02, DA_WIN_MAX, 0x2A, 0xFF, 0x50
                 db 0xF6, 0x0F, 0x08
 
 ; Command/status sector buffer. da_command relies on the signature being

@@ -40,7 +40,8 @@ the sneaker is an SD card.
    ```
 
    Options: `/F=NAME.IMG` (image file name, default `GOTEKHDD.IMG`),
-   `/U=1` (emulator is B:), `/V` (verbose).
+   `/U=1` (emulator is B:), `/V` (verbose), `/N=n` (sectors per DA
+   transaction, default 32, max 64 — see Performance).
 
 3. Reboot. The driver reports the new drive letter.
 
@@ -75,7 +76,9 @@ DRVTEST, not with a DOS-mounted GotekHDD drive.
 1. `DAPING` — status probe. Must show the firmware version.
 2. `DAPING /M` — note which fixup rows PASS on your BIOS.
 3. `DAPING /L 0` — dumps the card's MBR through the DA window.
-4. `DAPING /B` — read throughput (each dot is one 4KB window).
+4. `DAPING /B` — read throughput (each dot is one window). Try
+   `/B /N=48` etc. to find the largest window your BIOS transfers
+   without erroring, then pass the same `/N` to the driver.
 5. `DAPING /T /W` — millisecond timing of every INT 13h step in a DA
    window (command write, status reads, 8-sector read and write), 16
    iterations on one card LBA, plus retry and verification counters.
@@ -91,17 +94,35 @@ DRVTEST, not with a DOS-mounted GotekHDD drive.
 
 ## Performance
 
-The floppy bus is the bus: 250 kbit/s MFM, 4KB per disk revolution at
-300 RPM. Expect roughly 10–15 KB/s reads and 5–8 KB/s writes. It is a
-very patient hard drive. It is, however, a real one: `DIR`, `COPY`,
-`CHKDSK`, running programs — everything works.
+The floppy bus is the bus: 250 kbit/s MFM. The cost of a transfer is
+dominated by a fixed per-transaction toll — one `SET_LBA` command plus
+the rotational wait for the window to come round — so the driver
+amortises it over a large window instead of paying it every 8 sectors.
+
+`SET_LBA` carries the window size, and the firmware sizes the virtual DA
+track to match (up to the whole request in one continuous read), so a
+32-sector window pays the toll once per 16KB. The window is `/N=n`,
+default 32, max 64. Bigger is faster up to a point; the ceiling is the
+PC diskette BIOS's own operation timeout on a single multi-sector INT
+13h call, which is why the default is conservative. Tune it on your
+machine with `DAPING /B /N=48` and `DAPING /T /W /N=48`, then set the
+same `/N` on the `DEVICE=` line. For reference, HxCMount (the Atari
+equivalent, banging the FDC directly) reaches ~20 KB/s reads and ~13
+KB/s writes at large windows; through the PC BIOS expect somewhat less.
+
+There is no status-sector readback per transfer: one command, one
+multi-sector transfer, done. INT 13h still reports FDC-level errors and
+the driver retries them; `DAPING /T /W` is the write-integrity check to
+run during bring-up. It is a real hard drive: `DIR`, `COPY`, `CHKDSK`,
+running programs — everything works.
 
 ## How it works
 
 FlashFloppy (and HxC) firmware exposes a "Direct Access" mode: seek to
-cylinder 255 and a virtual 9-sector MFM track appears. Sector 0 is a
+cylinder 255 and a virtual MFM track appears. Sector 0 is a
 command/status mailbox (signature `HxCFEDA`); after a `SET_LBA` command,
-sectors 1–8 read/write through to any LBA of the SD card. See
+the data sectors 1..N (N chosen by the command, default 8) read/write
+through to consecutive LBAs of the SD card. See
 `FlashFloppy/src/image/da.c` for the authoritative firmware side.
 
 `GOTEKHDD.SYS` at INIT:
@@ -116,9 +137,11 @@ sectors 1–8 read/write through to any LBA of the SD card. See
    that BPB to DOS.
 
 At run time, DOS logical sectors map through the partition offset and
-the extent table straight to card LBAs; transfers move up to 8 sectors
-per `SET_LBA` window and are verified against the firmware's status
-counters. All BIOS floppy state is saved/restored around each request,
+the extent table straight to card LBAs; transfers move up to `/N`
+sectors per `SET_LBA` window (the command carries the window size and
+the firmware sizes the DA track to it, re-establishing the track after
+the command write — standard FlashFloppy/HxC behaviour, no firmware
+change). All BIOS floppy state is saved/restored around each request,
 so A: floppy access between requests behaves normally.
 
 The card's FAT metadata is never written — the driver only touches the

@@ -252,12 +252,15 @@ do_bench:
         jc      bench_fail_pop
         push    ds
         pop     es
-        mov     ax, 0x0208              ; read 8 sectors
+        mov     ah, 2                   ; read one window (da_nsec sectors)
+        mov     al, [da_nsec]
         mov     bx, sec_buf
         mov     cl, 1
         call    da_data
         jc      bench_fail_pop
-        add     word [cur_lba], 8
+        mov     al, [da_nsec]
+        xor     ah, ah
+        add     [cur_lba], ax
         adc     word [cur_lba+2], 0
         mov     al, '.'                 ; checkpoint: window done
         call    putc
@@ -279,14 +282,17 @@ do_bench:
         call    crlf
         mov     dx, msg_rate
         call    puts
+        ; total bytes = da_nsec * 16 windows * 512; rate x10 KB/s =
+        ; totalKB*182/ticks = da_nsec*1456/ticks (16*512/1024 = 8, *182)
+        mov     al, [da_nsec]
+        xor     ah, ah
+        mov     cx, 1456
+        mul     cx                      ; DX:AX = da_nsec*1456
         mov     cx, [t0]                ; ticks
-        mov     ax, 11651               ; 64KB*18.2t/s -> KB/s x10
-        xor     dx, dx
-        div     cx
-        mov     cx, 10                  ; print as nn.n
-        xor     dx, dx
-        div     cx
-        push    dx
+        call    div32                   ; DX:AX = rate x10
+        mov     cx, 10                  ; split into nn.n
+        call    div32                   ; DX:AX = integer, BX = tenths
+        push    bx
         call    put_dec16
         mov     al, '.'
         call    putc
@@ -382,6 +388,10 @@ do_timing:
         mov     ax, [arg1]
         mov     dx, [arg1+2]
         call    put_dec32
+        mov     dx, msg_t_win
+        call    puts
+        mov     al, [da_nsec]
+        call    put_dec8
         mov     dx, msg_t_head2
         call    puts
         mov     word [da_retry_cnt], 0
@@ -427,7 +437,7 @@ do_timing:
         cmp     byte [t_lbaok], 0       ; never write on an unverified LBA
         je      .p7
         mov     al, [da_buf+DAS_WRITE_CNT]
-        add     al, DA_NSEC
+        add     al, [da_nsec]
         mov     [want_wrcnt], al
         ; 5: data write-back straight after a status read
         call    tm_start
@@ -562,14 +572,16 @@ t_setlba:
 t_read8:
         push    ds
         pop     es
-        mov     ax, 0x0200|DA_NSEC
+        mov     ah, 2
+        mov     al, [da_nsec]
         mov     bx, sec_buf
         mov     cl, 1
         jmp     da_data
 t_write8:
         push    ds
         pop     es
-        mov     ax, 0x0300|DA_NSEC
+        mov     ah, 3
+        mov     al, [da_nsec]
         mov     bx, sec_buf
         mov     cl, 1
         jmp     da_data
@@ -855,6 +867,8 @@ parse_args:
         je      .unit
         cmp     al, 'W'
         je      .write_ok
+        cmp     al, 'N'
+        je      .win
         mov     [mode], al
         cmp     al, 'L'
         je      .one_arg
@@ -865,6 +879,17 @@ parse_args:
         jmp     .scan
 .write_ok:
         mov     byte [opt_w], 1
+        jmp     .scan
+.win:                                   ; /N=n window size for /B and /T
+        call    parse_dec32
+        mov     ax, [num]
+        or      ax, ax
+        jz      .scan
+        cmp     ax, DA_WIN_MAX
+        jbe     .win_ok
+        mov     ax, DA_WIN_MAX
+.win_ok:
+        mov     [da_nsec], al
         jmp     .scan
 .unit:
         call    parse_dec32
@@ -1085,15 +1110,16 @@ msg_kbs:    db ' KB/s', 13, 10, '$'
 msg_crlf:   db 13, 10, '$'
 
 msg_t_head: db 'DA step timing, 16 iterations at card LBA $'
-msg_t_head2: db ' (avg / max ms)', 13, 10, '$'
+msg_t_win:  db ', window $'
+msg_t_head2: db ' sectors (avg / max ms)', 13, 10, '$'
 msg_p1:     db ' 1 SET_LBA cmd write, random phase : $'
 msg_p2:     db ' 2 status read after cmd write     : $'
-msg_p3:     db ' 3 read 8 after status read        : $'
-msg_p4:     db ' 4 status read after read 8        : $'
-msg_p5:     db ' 5 write 8 after status read       : $'
-msg_p6:     db ' 6 status read after write 8       : $'
+msg_p3:     db ' 3 data read after status read     : $'
+msg_p4:     db ' 4 status read after data read     : $'
+msg_p5:     db ' 5 data write after status read    : $'
+msg_p6:     db ' 6 status read after data write    : $'
 msg_p7:     db ' 7 SET_LBA cmd write after status  : $'
-msg_p8:     db ' 8 read 8 after cmd write          : $'
+msg_p8:     db ' 8 data read after cmd write        : $'
 msg_slash:  db ' / $'
 msg_ms:     db ' ms', 13, 10, '$'
 msg_ms_eq:  db ' ms = $'
@@ -1109,4 +1135,7 @@ msg_t_hint: db 'One revolution is ~200 ms (9 sectors of ~22 ms). A step that cos
             db 13, 10, 'waited a full turn.', 13, 10, '$'
 msg_t_step: db 'failed at step $'
 
-sec_buf:    times SEC_SZ*DA_NSEC db 0
+; Window buffer: up to SEC_SZ*DA_WIN_MAX bytes. Placed last and left
+; uninitialised so it lives in the .COM's free segment memory (below the
+; stack) without inflating the file by 32KB.
+sec_buf:

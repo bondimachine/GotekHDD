@@ -10,7 +10,9 @@
 
 DA_CYL          equ 255         ; MFM DD direct-access cylinder
 DA_HEAD         equ 0
-DA_NSEC         equ 8           ; data sectors per window (IDs 1..8)
+DA_NSEC         equ 8           ; protocol default window (IDs 1..8)
+DA_WIN_DEFAULT  equ 32          ; driver default window (sectors/transaction)
+DA_WIN_MAX      equ 64          ; ceiling; the DPT EOT and buffers allow this
 SEC_SZ          equ 512
 
 ; DA commands (da_cmd_sector.cmd)

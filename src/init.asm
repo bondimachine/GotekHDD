@@ -342,7 +342,8 @@ iread_img_sector:
 .bad:   ret
 
 ; ---------------------------------------------------------------------
-; parse_line: scan i_line for /F=..., /U=n, /V. Fills i_name (11 chars).
+; parse_line: scan i_line for /F=..., /U=n, /N=n, /V, /A, /X. Fills
+; i_name (11 chars).
 parse_line:
         mov     si, i_line
 .scan:  lodsb
@@ -367,6 +368,39 @@ parse_line:
         mov     byte [da_fixmask], FIX_XT
         jmp     .scan
 .not_x:
+        cmp     al, 'N'                 ; /N=n window size (1..DA_WIN_MAX)
+        jne     .not_n
+        lodsb                           ; optional '=' or ':'
+        cmp     al, '='
+        je      .n_acc
+        cmp     al, ':'
+        je      .n_acc
+        dec     si                      ; no separator: it was a digit
+.n_acc: xor     bx, bx
+.n_dig: lodsb
+        cmp     al, '0'
+        jb      .n_end
+        cmp     al, '9'
+        ja      .n_end
+        sub     al, '0'
+        push    ax
+        mov     ax, bx                  ; bx = bx*10 + digit
+        mov     cx, 10
+        mul     cx
+        mov     bx, ax
+        pop     ax
+        xor     ah, ah
+        add     bx, ax
+        jmp     .n_dig
+.n_end: dec     si                      ; unread the terminator
+        or      bx, bx
+        jz      .scan                   ; /N=0 or no digits: keep default
+        cmp     bx, DA_WIN_MAX
+        jbe     .n_ok
+        mov     bx, DA_WIN_MAX
+.n_ok:  mov     [max_win], bl
+        jmp     .scan
+.not_n:
         cmp     al, 'U'
         jne     .not_u
         lodsb                           ; expect '=' or ':'

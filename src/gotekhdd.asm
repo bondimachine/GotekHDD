@@ -38,6 +38,7 @@ bpb_array:      dw bpb
 part_start:     dd 0                    ; partition start (image sectors)
 total_vsecs:    dd 0                    ; partition size in sectors
 verbose:        db 0
+max_win:        db DA_WIN_DEFAULT       ; sectors per DA transaction (/N=n)
 
 ; Extent table: image file location on the card as up to MAX_EXTENTS
 ; contiguous runs. Each entry: file-relative start sector (4), card LBA
@@ -49,7 +50,6 @@ ext_table:      times MAX_EXTENTS*EXT_SIZE db 0
 
 ; card window I/O state
 io_lba:         dd 0                    ; current window's card LBA
-io_wrcnt:       db 0                    ; expected DAS_WRITE_CNT after write
 io_tries:       db 0
 
 ; ---------------------------------------------------------------------
@@ -174,11 +174,13 @@ read_write:
         jc      .fail_notfound
         mov     [io_lba], ax
         mov     [io_lba+2], dx
-        ; n = min(rw_left, DA_NSEC, run, sectors-to-64KB-boundary)
+        ; n = min(rw_left, max_win, run, sectors-to-64KB-boundary)
         mov     ax, [rw_left]
-        cmp     ax, DA_NSEC
+        mov     bl, [max_win]
+        xor     bh, bh
+        cmp     ax, bx
         jbe     .n1
-        mov     ax, DA_NSEC
+        mov     ax, bx
 .n1:    cmp     ax, cx
         jbe     .n2
         mov     ax, cx
@@ -269,32 +271,33 @@ dma_clamp:
         ret
 
 ; ---------------------------------------------------------------------
-; card_io: one verified DA window transfer.
+; card_io: one DA window transfer of [rw_n] sectors.
 ; In: [rw_op] 2/3, [rw_n] count, [io_lba] card LBA, [rw_buf] user buffer
-;     ([rw_bounce]: use resident bounce buffer instead).
+;     ([rw_bounce]: use the resident bounce buffer for a single sector).
 ; Out: CF clear on success; CF set + AH = error code on failure.
-; The verify step reads the status sector (which directly follows data
-; sector 8 on the track, so it usually costs little extra latency) and
-; checks the firmware really operated on our LBA; for writes it also
-; checks the accepted-write counter advanced by n.
+;
+; One SET_LBA (which sizes the firmware's DA track to exactly [rw_n]
+; sectors) followed by one multi-sector INT 13h op, no status readbacks:
+; the toll of a SET_LBA and the rotational wait for the window is paid
+; once per window rather than once per sector, and nothing waits an
+; extra revolution to re-read the status sector. INT 13h still reports
+; FDC-level errors (CRC/DMA) and da_int13 retries them; DAPING /T /W is
+; the integrity check for firmware bring-up. Whole-transaction retry
+; wraps it for robustness on a marginal seek.
 card_io:
         mov     byte [io_tries], 3
 .attempt:
+        mov     al, [rw_n]              ; size the DA track to this window
+        mov     [da_nsec], al
         mov     ax, [io_lba]
         mov     dx, [io_lba+2]
         call    da_set_lba
         jc      .retry
+        ; bounce-buffered write: stage the user sector into the bounce buf
         cmp     byte [rw_op], 3
-        jne     .no_pre
-        ; writes: baseline the write counter first
-        call    da_read_status
-        jc      .retry
-        mov     al, [da_buf+DAS_WRITE_CNT]
-        add     al, [rw_n]
-        mov     [io_wrcnt], al
-        ; bounce-buffered write: copy user sector into the bounce buffer
+        jne     .xfer
         cmp     byte [rw_bounce], 0
-        je      .no_pre
+        je      .xfer
         push    ds
         pop     es
         mov     di, [bounce_off]
@@ -303,40 +306,24 @@ card_io:
         rep movsw
         push    cs
         pop     ds
-.no_pre:
-        ; data transfer
+.xfer:
         mov     ah, [rw_op]
         mov     al, [rw_n]
-        mov     cl, 1
+        mov     cl, 1                   ; first data sector ID
         cmp     byte [rw_bounce], 0
         je      .user_buf
         push    ds
         pop     es
         mov     bx, [bounce_off]
-        jmp     .xfer
+        jmp     .go
 .user_buf:
         les     bx, [rw_buf]
-.xfer:
+.go:
         call    da_data
         jc      .retry
-        ; verify window
-        call    da_read_status
-        jc      .retry
-        mov     ax, [da_buf+DAS_LBA_BASE]
-        cmp     ax, [io_lba]
-        jne     .vretry
-        mov     ax, [da_buf+DAS_LBA_BASE+2]
-        cmp     ax, [io_lba+2]
-        jne     .vretry
+        ; bounce-buffered read: copy the sector out to the user buffer
         cmp     byte [rw_op], 3
-        jne     .read_done
-        mov     al, [da_buf+DAS_WRITE_CNT]
-        cmp     al, [io_wrcnt]
-        jne     .vretry
-        clc
-        ret
-.read_done:
-        ; bounce-buffered read: copy out to the user buffer
+        je      .ok
         cmp     byte [rw_bounce], 0
         je      .ok
         mov     si, [bounce_off]
@@ -346,8 +333,6 @@ card_io:
 .ok:
         clc
         ret
-.vretry:
-        mov     ah, 0xFE                ; verify mismatch, no BIOS code
 .retry:
         mov     [da_err], ah
         dec     byte [io_tries]
@@ -358,10 +343,6 @@ card_io:
         jmp     .attempt
 .fail:
         mov     ah, [da_err]
-        or      ah, ah                  ; verify mismatch with no BIOS
-        jnz     .have_code              ; error: report general failure
-        mov     ah, 0xFE
-.have_code:
         stc
         ret
 

@@ -35,6 +35,7 @@ fhandle:    dw 0                ; file mode: open handle on the image
 stub_psp:   dw 0                ; file mode: our PSP for handle access
 img_secs:   dd 0                ; image size in sectors
 lba_base:   dd 0
+stub_nsec:  db 8                ; current window (SET_LBA param[5]; 0 -> 8)
 cmd_cnt:    db 0
 read_cnt:   db 0
 write_cnt:  db 0
@@ -114,10 +115,10 @@ hook13:
         jmp     far [cs:old13]
 
 ; -----------------------------------------------------------------------
-; data_window: sectors 1..8 <-> XMS image at lba_base+id-1. DS = CS.
+; data_window: sectors 1..nr_sec <-> image at lba_base+id-1. DS = CS.
 data_window:
-        mov     cl, [v_cx]              ; first sector id (1..8)
-        cmp     cl, 8
+        mov     cl, [v_cx]              ; first sector id (1..nr_sec)
+        cmp     cl, [stub_nsec]
         ja      .badsec
         mov     al, [v_ax]              ; count
         or      al, al
@@ -125,7 +126,7 @@ data_window:
         mov     ah, al
         add     ah, cl
         dec     ah
-        cmp     ah, 8                   ; last id must be <= 8
+        cmp     ah, [stub_nsec]         ; last id must be <= nr_sec
         ja      .badsec
         mov     ch, al                  ; CH = count, CL = first id
         ; lba = lba_base + id - 1
@@ -303,7 +304,8 @@ cmd_status:
         mov     al, [last_status]
         mov     [es:di+DAS_LAST_STATUS], al
         mov     byte [es:di+DAS_SD_CD], 1
-        mov     byte [es:di+DAS_NR_SEC], 8
+        mov     al, [stub_nsec]
+        mov     [es:di+DAS_NR_SEC], al
         ret
 .command:
         ; ---- command write: parse the caller's buffer ----
@@ -330,6 +332,14 @@ cmd_status:
         mov     [lba_base], ax
         mov     ax, [es:si+DAC_PARAM-8+2]
         mov     [lba_base+2], ax
+        mov     al, [es:si+DAC_PARAM-8+5]   ; param[5] = nr_sec (0 -> 8),
+        or      al, al                      ; matching da.c; clamp to the
+        jnz     .haven                      ; window ceiling we model
+        mov     al, 8
+.haven: cmp     al, DA_WIN_MAX
+        jbe     .setn
+        mov     al, DA_WIN_MAX
+.setn:  mov     [stub_nsec], al
 .ok:
         mov     byte [last_status], 0
 .done:
