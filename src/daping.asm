@@ -15,6 +15,10 @@
 ;                     write path too: it writes back the bytes it just read.
 ;   DAPING /C a b     send SET_CYL(a, b)
 ;   DAPING /U n       use BIOS drive n (default 0); combines with above
+;   DAPING /N n       window size in sectors for /B and /T (default 8)
+;   DAPING /1         one attempt per INT 13h op: report the first failure
+;                     as-is instead of retrying (a retry resets the FDC and
+;                     the recalibrate drops the firmware out of DA mode)
 ;
 ; Build: nasm -f bin daping.asm -o DAPING.COM
 
@@ -224,6 +228,7 @@ do_lba:
 ; ---------------------------------------------------------------------
 ; /B: read 64KB = 16 windows of 8 sectors, time with the BDA tick count.
 do_bench:
+        mov     word [da_retry_cnt], 0
         call    da_begin
         call    da_read_status
         jc      bench_fail
@@ -300,6 +305,11 @@ do_bench:
         call    put_dec16
         mov     dx, msg_kbs
         call    puts
+        mov     dx, msg_t_retry         ; a retry costs a recalibrate: it
+        call    puts                    ; must show up, not hide in the rate
+        mov     ax, [da_retry_cnt]
+        call    put_dec16
+        call    crlf
         xor     al, al
         jmp     exit
 bench_fail_pop:
@@ -364,10 +374,16 @@ do_setcyl:
 ;   5 write 8 sectors     right after a status read      (/W only)
 ;   6 status read         right after the data write     (/W only)
 ;   7 SET_LBA cmd write   right after a status read
-;   8 read 8 data sectors right after the cmd write
-; The driver's read window is 1+8+4; its write window is 1+2+5+6.
-; All steps use the same card LBA, so a lost command can never redirect
-; the write-back (step 5 rewrites exactly the bytes step 3 read).
+;   8 read the window     right after the cmd write   (driver read path)
+;   9 SET_LBA cmd write   right after a data read      (driver next window)
+;  10 write the window    right after the cmd write   (driver write path,
+;                                                       /W only)
+;  11 status read         to verify step 10            (/W only)
+; The driver's fast path is cmd + data with no status readback, so its
+; read window is 1+8 and its write window 1+10; the status-read steps
+; are turnaround diagnostics. All steps use the same card LBA, so a lost
+; command can never redirect a write-back (steps 5 and 10 rewrite exactly
+; the bytes step 3 read).
 T_ITER          equ 16
 PIT_PER_MS      equ 1193                ; 1.19318 MHz PIT clock
 
@@ -453,8 +469,9 @@ do_timing:
         jc      tfail
         mov     al, [da_buf+DAS_WRITE_CNT]
         cmp     al, [want_wrcnt]
-        je      .p7
+        je      .w6ok
         inc     word [t_badwr]
+.w6ok:  mov     [want_wrcnt], al        ; actual count: baseline for step 10
 .p7:    ; 7: command write straight after a status read
         call    tm_start
         call    t_setlba
@@ -467,7 +484,37 @@ do_timing:
         mov     si, ph8
         call    tm_end
         jc      tfail
-        mov     al, '.'
+        ; 9: command write straight after a data read (the driver's
+        ;    window-to-window transition inside one request)
+        call    tm_start
+        call    t_setlba
+        mov     si, ph9
+        call    tm_end
+        jc      tfail
+        cmp     byte [opt_w], 0
+        je      .dot
+        cmp     byte [t_lbaok], 0
+        je      .dot
+        ; 10: data write straight after the command write (driver write path)
+        mov     al, [want_wrcnt]
+        add     al, [da_nsec]
+        mov     [want_wrcnt], al
+        call    tm_start
+        call    t_write8
+        mov     si, ph10
+        call    tm_end
+        jc      tfail
+        ; 11: status read to verify step 10 (write_cnt advanced by the window)
+        call    tm_start
+        call    da_read_status
+        mov     si, ph11
+        call    tm_end
+        jc      tfail
+        mov     al, [da_buf+DAS_WRITE_CNT]
+        cmp     al, [want_wrcnt]
+        je      .dot
+        inc     word [t_badwr]
+.dot:   mov     al, '.'
         call    putc
         dec     word [t_iter]
         jnz     .iter
@@ -476,7 +523,7 @@ do_timing:
         call    crlf
         ; per-step table
         mov     si, ph_table
-        mov     cx, 8
+        mov     cx, 11
 .row:   push    cx
         mov     dx, [si]
         call    puts
@@ -486,6 +533,10 @@ do_timing:
         cmp     bx, ph5
         je      .skip
         cmp     bx, ph6
+        je      .skip
+        cmp     bx, ph10
+        je      .skip
+        cmp     bx, ph11
         je      .skip
 .have:  call    print_rec
         jmp     .next
@@ -509,14 +560,14 @@ do_timing:
         call    put_dec16
         call    crlf
         ; derived driver windows
+        ; derived driver windows: the fast path is cmd write + data op,
+        ; no status readback (steps 2/4/6/11 are diagnostics only)
         mov     dx, msg_t_rdwin
         call    puts
         mov     ax, [ph1]
         mov     dx, [ph1+2]
         add     ax, [ph8]
         adc     dx, [ph8+2]
-        add     ax, [ph4]
-        adc     dx, [ph4+2]
         call    avg_ms
         call    print_window
         cmp     byte [opt_w], 0
@@ -525,12 +576,8 @@ do_timing:
         call    puts
         mov     ax, [ph1]
         mov     dx, [ph1+2]
-        add     ax, [ph2]
-        adc     dx, [ph2+2]
-        add     ax, [ph5]
-        adc     dx, [ph5+2]
-        add     ax, [ph6]
-        adc     dx, [ph6+2]
+        add     ax, [ph10]
+        adc     dx, [ph10+2]
         call    avg_ms
         call    print_window
 .hint:
@@ -552,9 +599,20 @@ tfail:                                  ; AH = error, SI -> failed step
         shr     ax, cl
         inc     ax
         call    put_dec16
+        mov     dx, msg_t_took          ; duration of the failed step
+        call    puts
+        mov     ax, [t_last]
+        mov     dx, [t_last+2]
+        mov     cx, PIT_PER_MS
+        call    div32
+        call    put_dec32
+        mov     dx, msg_t_took2         ; retries consumed before giving up
+        call    puts
+        mov     ax, [da_retry_cnt]
+        call    put_dec16
         call    crlf
         pop     ax
-        call    print_da_err
+        call    print_da_err            ; with /1 this is the first-attempt code
         mov     al, 1
         jmp     exit
 tfail0:                                 ; failure during setup
@@ -744,6 +802,8 @@ tm_end:
         call    timer_read
         sub     ax, [ts]
         sbb     dx, [ts+2]
+        mov     [t_last], ax            ; this sample (tfail reports it)
+        mov     [t_last+2], dx
         add     [si], ax
         adc     [si+2], dx
         cmp     dx, [si+6]
@@ -892,6 +952,8 @@ parse_args:
         je      .write_ok
         cmp     al, 'N'
         je      .win
+        cmp     al, '1' & 0xDF          ; /1: single attempt per INT 13h op
+        je      .once
         mov     [mode], al
         cmp     al, 'L'
         je      .one_arg
@@ -903,6 +965,9 @@ parse_args:
 .write_ok:
         mov     byte [opt_w], 1
         jmp     .scan
+.once:                                  ; no retries: the first failure is
+        mov     byte [da_max_tries], 1  ; reported as-is, and no FDC reset
+        jmp     .scan                   ; recalibrates the drive out of DA
 .win:                                   ; /N=n window size for /B and /T
         call    parse_dec32
         mov     ax, [num]
@@ -1109,8 +1174,13 @@ ph5:        dd 0, 0
 ph6:        dd 0, 0
 ph7:        dd 0, 0
 ph8:        dd 0, 0
+ph9:        dd 0, 0
+ph10:       dd 0, 0
+ph11:       dd 0, 0                     ; keep ph1..ph11 contiguous (tfail)
+t_last:     dd 0                        ; most recent step sample
 ph_table:   dw msg_p1, ph1, msg_p2, ph2, msg_p3, ph3, msg_p4, ph4
             dw msg_p5, ph5, msg_p6, ph6, msg_p7, ph7, msg_p8, ph8
+            dw msg_p9, ph9, msg_p10, ph10, msg_p11, ph11
 
 msg_probing: db 'GotekHDD DAPING 0.1 - probing Direct Access track...', 13, 10, '$'
 msg_fixups: db 'BIOS fixups   : $'
@@ -1144,7 +1214,10 @@ msg_p4:     db ' 4 status read after data read     : $'
 msg_p5:     db ' 5 data write after status read    : $'
 msg_p6:     db ' 6 status read after data write    : $'
 msg_p7:     db ' 7 SET_LBA cmd write after status  : $'
-msg_p8:     db ' 8 data read after cmd write        : $'
+msg_p8:     db ' 8 data read after cmd write       : $'
+msg_p9:     db ' 9 SET_LBA cmd write after data rd : $'
+msg_p10:    db '10 data write after cmd write      : $'
+msg_p11:    db '11 status read after data write    : $'
 msg_slash:  db ' / $'
 msg_ms:     db ' ms', 13, 10, '$'
 msg_ms_eq:  db ' ms = $'
@@ -1153,12 +1226,14 @@ msg_skipped: db 'skipped (add /W to write back the bytes read)', 13, 10, '$'
 msg_t_retry: db 'INT 13h retries: $'
 msg_t_badlba: db '   lba_base mismatches: $'
 msg_t_badwr: db '   write_cnt mismatches: $'
-msg_t_rdwin: db 'driver READ window  (1+8+4)   : $'
-msg_t_wrwin: db 'driver WRITE window (1+2+5+6) : $'
+msg_t_rdwin: db 'driver READ window  (1+8)  : $'
+msg_t_wrwin: db 'driver WRITE window (1+10) : $'
 msg_t_hint: db 'One revolution is ~200 ms (9 sectors of ~22 ms). A step that costs'
             db 13, 10, '~200 ms more than its sector count needs missed its sector and'
             db 13, 10, 'waited a full turn.', 13, 10, '$'
 msg_t_step: db 'failed at step $'
+msg_t_took: db ', that attempt took $'
+msg_t_took2: db ' ms, failed INT 13h attempts: $'
 msg_nomem:  db 'ERROR: not enough memory for a 64KB-aligned window buffer', 13, 10, '$'
 
 ; Single-sector buffer for /L and the volume probe (window transfers use

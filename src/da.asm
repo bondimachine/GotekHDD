@@ -123,7 +123,8 @@ da_end:
 da_int13:
         mov     [da_op], ax
         mov     [da_sector], cl
-        mov     byte [da_tries], 4
+        mov     al, [da_max_tries]      ; 4; DAPING /1 sets 1
+        mov     [da_tries], al
         jmp     da_int13_once.retry     ; shared attempt loop below
 
 ; da_int13_once: same op, exactly one attempt, no reset. A data-window
@@ -257,6 +258,7 @@ da_old_cyl:     db 0
 da_op:          dw 0
 da_sector:      db 0
 da_tries:       db 0
+da_max_tries:   db 4                    ; attempts per op for da_int13
 da_err:         db 0
 da_retry_cnt:   dw 0                    ; failed INT 13h attempts (total)
 

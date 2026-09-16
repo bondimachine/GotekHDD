@@ -85,7 +85,12 @@ DRVTEST, not with a DOS-mounted GotekHDD drive.
    `/W` writes back the very bytes just read, so it is safe; without
    it only the read-side steps run. Any step costing ~200 ms more than
    its sector count needs (22 ms per sector) missed its sector and
-   waited a full revolution — that is where the time goes.
+   waited a full revolution — that is where the time goes. Steps 8 and
+   10 are the driver's actual read and write transitions; the
+   status-read steps are turnaround diagnostics. Add `/N=n` to time the
+   window the driver will use, and `/1` to disable retries so a failure
+   reports its first error code and duration instead of the aftermath
+   of a recalibrate.
 6. `DRVTEST` / `DRVTEST /S 0 /N 2048` — full driver logic without
    mounting (compare the checksum with `test/verify-sum.py`).
 7. `DEVICE=GOTEKHDD.SYS` in CONFIG.SYS, reboot, `DIR` the new drive.
