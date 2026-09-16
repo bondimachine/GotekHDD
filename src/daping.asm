@@ -26,6 +26,7 @@
 start:
         cld
         call    da_autofix
+        call    setup_winbuf
         call    parse_args
         mov     al, [mode]
         cmp     al, 'M'
@@ -250,11 +251,10 @@ do_bench:
         mov     dx, [cur_lba+2]
         call    da_set_lba
         jc      bench_fail_pop
-        push    ds
-        pop     es
+        mov     es, [win_seg]           ; 64KB-aligned window buffer
+        xor     bx, bx
         mov     ah, 2                   ; read one window (da_nsec sectors)
         mov     al, [da_nsec]
-        mov     bx, sec_buf
         mov     cl, 1
         call    da_data
         jc      bench_fail_pop
@@ -569,20 +569,18 @@ t_setlba:
         mov     ax, [arg1]
         mov     dx, [arg1+2]
         jmp     da_set_lba
-t_read8:
-        push    ds
-        pop     es
+t_read8:                                ; window read into the far buffer
+        mov     es, [win_seg]
+        xor     bx, bx
         mov     ah, 2
         mov     al, [da_nsec]
-        mov     bx, sec_buf
         mov     cl, 1
         jmp     da_data
-t_write8:
-        push    ds
-        pop     es
+t_write8:                               ; write the same buffer back
+        mov     es, [win_seg]
+        xor     bx, bx
         mov     ah, 3
         mov     al, [da_nsec]
-        mov     bx, sec_buf
         mov     cl, 1
         jmp     da_data
 
@@ -831,6 +829,28 @@ print_window:
         ret
 
 ; ---------------------------------------------------------------------
+; setup_winbuf: choose the window transfer buffer. A window is up to 32KB
+; and INT 13h DMA cannot cross a 64KB physical boundary (BIOS error 09h),
+; which an in-segment buffer at a random load address would hit 25-50%
+; of the time. Use the first 64KB-aligned paragraph above our segment;
+; DOS gives a .COM all remaining memory, so it is ours unless the
+; machine is nearly out of memory (PSP:2 = first paragraph past our
+; block), in which case bail out clearly rather than fail mysteriously.
+setup_winbuf:
+        mov     ax, cs
+        add     ax, 0x1000
+        and     ax, 0xF000
+        mov     [win_seg], ax
+        add     ax, (SEC_SZ*DA_WIN_MAX)/16
+        cmp     ax, [0x0002]
+        jbe     .ok
+        mov     dx, msg_nomem
+        call    puts
+        mov     al, 1
+        jmp     exit
+.ok:    ret
+
+; ---------------------------------------------------------------------
 exit:
         mov     ah, 0x4C
         int     0x21
@@ -1067,6 +1087,8 @@ t0:         dw 0
 cur_lba:    dd 0
 want_cmdcnt: db 0
 
+win_seg:    dw 0                        ; 64KB-aligned window buffer segment
+
 ; /T state
 opt_w:      db 0                        ; /W: include the write-back steps
 ts:         dd 0                        ; step start time
@@ -1134,8 +1156,9 @@ msg_t_hint: db 'One revolution is ~200 ms (9 sectors of ~22 ms). A step that cos
             db 13, 10, '~200 ms more than its sector count needs missed its sector and'
             db 13, 10, 'waited a full turn.', 13, 10, '$'
 msg_t_step: db 'failed at step $'
+msg_nomem:  db 'ERROR: not enough memory for a 64KB-aligned window buffer', 13, 10, '$'
 
-; Window buffer: up to SEC_SZ*DA_WIN_MAX bytes. Placed last and left
-; uninitialised so it lives in the .COM's free segment memory (below the
-; stack) without inflating the file by 32KB.
+; Single-sector buffer for /L and the volume probe (window transfers use
+; the far, 64KB-aligned buffer at win_seg:0). Placed last and left
+; uninitialised: it lives in the .COM's free segment memory.
 sec_buf:

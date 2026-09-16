@@ -124,6 +124,18 @@ da_int13:
         mov     [da_op], ax
         mov     [da_sector], cl
         mov     byte [da_tries], 4
+        jmp     da_int13_once.retry     ; shared attempt loop below
+
+; da_int13_once: same op, exactly one attempt, no reset. A data-window
+; op must never be retried blindly: the FDC reset in the retry path
+; makes the BIOS recalibrate on the next op, the seek below cylinder 254
+; drops the firmware out of DA mode and back in, and it forgets lba_base
+; and the window size. The caller (card_io) retries by re-sending
+; SET_LBA first.
+da_int13_once:
+        mov     [da_op], ax
+        mov     [da_sector], cl
+        mov     byte [da_tries], 1
 .retry:
         mov     ax, [da_op]
         mov     cl, [da_sector]
@@ -225,6 +237,11 @@ da_read_status:
 ; Out: CF as da_int13. Clobbers AX, CX, DX, DI.
 da_data:
         jmp     da_int13
+
+; da_data_once: as da_data, single attempt (see da_int13_once). Used by
+; the driver, whose card_io owns the retry and re-sends SET_LBA.
+da_data_once:
+        jmp     da_int13_once
 
 ; ---------------------------------------------------------------------
 ; Data

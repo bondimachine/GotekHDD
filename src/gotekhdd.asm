@@ -282,10 +282,15 @@ dma_clamp:
 ; once per window rather than once per sector, and nothing waits an
 ; extra revolution to re-read the status sector. INT 13h still reports
 ; FDC-level errors (CRC/DMA) and da_int13 retries them; DAPING /T /W is
-; the integrity check for firmware bring-up. Whole-transaction retry
-; wraps it for robustness on a marginal seek.
+; the integrity check for firmware bring-up.
+;
+; Retry is whole-transaction only: the data op gets a single attempt
+; (da_data_once) because an FDC reset + recalibrate drops the firmware
+; out of DA mode and forgets the window, so every retry re-sends
+; SET_LBA. Five attempts: a recalibrate from cylinder 255 can itself
+; need two passes (the FDC gives up after 79 step pulses).
 card_io:
-        mov     byte [io_tries], 3
+        mov     byte [io_tries], 5
 .attempt:
         mov     al, [rw_n]              ; size the DA track to this window
         mov     [da_nsec], al
@@ -319,7 +324,7 @@ card_io:
 .user_buf:
         les     bx, [rw_buf]
 .go:
-        call    da_data
+        call    da_data_once
         jc      .retry
         ; bounce-buffered read: copy the sector out to the user buffer
         cmp     byte [rw_op], 3
