@@ -133,6 +133,7 @@ da_int13:
         int     0x13
         jnc     .done
         mov     [da_err], ah
+        inc     word [da_retry_cnt]     ; diagnostics: failed attempts
         dec     byte [da_tries]
         jz      .fail
         ; Reset the controller after the second failed attempt; a reset
@@ -237,6 +238,7 @@ da_op:          dw 0
 da_sector:      db 0
 da_tries:       db 0
 da_err:         db 0
+da_retry_cnt:   dw 0                    ; failed INT 13h attempts (total)
 
 ; Diskette parameter table for the DA track: 512-byte sectors, EOT 9
 ; (IDs 0..8), MFM DD gap. Values otherwise standard 3.5" table.

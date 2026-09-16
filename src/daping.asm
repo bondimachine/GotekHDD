@@ -8,6 +8,11 @@
 ;   DAPING /L nnn     SET_LBA nnn (decimal), dump first 64 bytes of the
 ;                     card sector (LBA 0 = the card's MBR)
 ;   DAPING /B         read benchmark (64KB via 16 x 4KB windows)
+;   DAPING /T [lba]   phase timing: ms per INT 13h step of a DA window
+;                     (cmd write, status reads, 8-sector data ops), 16
+;                     iterations on one card LBA (default: 64 sectors into
+;                     the card FAT volume's data area). Add /W to time the
+;                     write path too: it writes back the bytes it just read.
 ;   DAPING /C a b     send SET_CYL(a, b)
 ;   DAPING /U n       use BIOS drive n (default 0); combines with above
 ;
@@ -29,6 +34,8 @@ start:
         je      do_lba
         cmp     al, 'B'
         je      do_bench
+        cmp     al, 'T'
+        je      do_timing
         cmp     al, 'C'
         je      do_setcyl
         ; fall through: default status mode
@@ -338,6 +345,480 @@ do_setcyl:
         jmp     exit
 
 ; ---------------------------------------------------------------------
+; /T [lba] [/W]: time every INT 13h step of a DA window transaction.
+;
+; Each iteration runs the steps below back-to-back and accumulates the
+; elapsed time of each (PIT-based clock, see timer_read), so a step that
+; sits near one revolution (~200 ms) above its raw data time tells us the
+; BIOS missed the sector it wanted and waited a full turn:
+;   1 SET_LBA cmd write   (random rotational phase: wait for sector 0)
+;   2 status read         right after the cmd write (sector 0 again)
+;   3 read 8 data sectors right after a status read (tiny gap: sector 1)
+;   4 status read         right after the data read (pre-index gap)
+;   5 write 8 sectors     right after a status read      (/W only)
+;   6 status read         right after the data write     (/W only)
+;   7 SET_LBA cmd write   right after a status read
+;   8 read 8 data sectors right after the cmd write
+; The driver's read window is 1+8+4; its write window is 1+2+5+6.
+; All steps use the same card LBA, so a lost command can never redirect
+; the write-back (step 5 rewrites exactly the bytes step 3 read).
+T_ITER          equ 16
+PIT_PER_MS      equ 1193                ; 1.19318 MHz PIT clock
+
+do_timing:
+        call    da_begin
+        call    da_read_status
+        jc      tfail0
+        mov     ax, [arg1]
+        or      ax, [arg1+2]
+        jnz     .have_lba
+        call    find_data_lba           ; -> DX:AX
+        jc      tfail0
+        mov     [arg1], ax
+        mov     [arg1+2], dx
+.have_lba:
+        mov     dx, msg_t_head
+        call    puts
+        mov     ax, [arg1]
+        mov     dx, [arg1+2]
+        call    put_dec32
+        mov     dx, msg_t_head2
+        call    puts
+        mov     word [da_retry_cnt], 0
+        call    timer_init
+        mov     word [t_iter], T_ITER
+.iter:
+        ; 1: SET_LBA at a random rotational phase
+        call    tm_start
+        call    t_setlba
+        mov     si, ph1
+        call    tm_end
+        jc      tfail
+        ; 2: status read straight after the command write
+        call    tm_start
+        call    da_read_status
+        mov     si, ph2
+        call    tm_end
+        jc      tfail
+        mov     byte [t_lbaok], 1
+        mov     ax, [da_buf+DAS_LBA_BASE]
+        cmp     ax, [arg1]
+        jne     .badlba
+        mov     ax, [da_buf+DAS_LBA_BASE+2]
+        cmp     ax, [arg1+2]
+        je      .p3
+.badlba:
+        inc     word [t_badlba]
+        mov     byte [t_lbaok], 0
+.p3:    ; 3: data read straight after a status read
+        call    tm_start
+        call    t_read8
+        mov     si, ph3
+        call    tm_end
+        jc      tfail
+        ; 4: status read straight after the data read
+        call    tm_start
+        call    da_read_status
+        mov     si, ph4
+        call    tm_end
+        jc      tfail
+        cmp     byte [opt_w], 0
+        je      .p7
+        cmp     byte [t_lbaok], 0       ; never write on an unverified LBA
+        je      .p7
+        mov     al, [da_buf+DAS_WRITE_CNT]
+        add     al, DA_NSEC
+        mov     [want_wrcnt], al
+        ; 5: data write-back straight after a status read
+        call    tm_start
+        call    t_write8
+        mov     si, ph5
+        call    tm_end
+        jc      tfail
+        ; 6: status read straight after the data write
+        call    tm_start
+        call    da_read_status
+        mov     si, ph6
+        call    tm_end
+        jc      tfail
+        mov     al, [da_buf+DAS_WRITE_CNT]
+        cmp     al, [want_wrcnt]
+        je      .p7
+        inc     word [t_badwr]
+.p7:    ; 7: command write straight after a status read
+        call    tm_start
+        call    t_setlba
+        mov     si, ph7
+        call    tm_end
+        jc      tfail
+        ; 8: data read straight after the command write (driver read path)
+        call    tm_start
+        call    t_read8
+        mov     si, ph8
+        call    tm_end
+        jc      tfail
+        mov     al, '.'
+        call    putc
+        dec     word [t_iter]
+        jnz     .iter
+        call    timer_restore
+        call    da_end
+        call    crlf
+        ; per-step table
+        mov     si, ph_table
+        mov     cx, 8
+.row:   push    cx
+        mov     dx, [si]
+        call    puts
+        mov     bx, [si+2]
+        cmp     byte [opt_w], 0
+        jne     .have
+        cmp     bx, ph5
+        je      .skip
+        cmp     bx, ph6
+        je      .skip
+.have:  call    print_rec
+        jmp     .next
+.skip:  mov     dx, msg_skipped
+        call    puts
+.next:  add     si, 4
+        pop     cx
+        loop    .row
+        ; counters
+        mov     dx, msg_t_retry
+        call    puts
+        mov     ax, [da_retry_cnt]
+        call    put_dec16
+        mov     dx, msg_t_badlba
+        call    puts
+        mov     ax, [t_badlba]
+        call    put_dec16
+        mov     dx, msg_t_badwr
+        call    puts
+        mov     ax, [t_badwr]
+        call    put_dec16
+        call    crlf
+        ; derived driver windows
+        mov     dx, msg_t_rdwin
+        call    puts
+        mov     ax, [ph1]
+        mov     dx, [ph1+2]
+        add     ax, [ph8]
+        adc     dx, [ph8+2]
+        add     ax, [ph4]
+        adc     dx, [ph4+2]
+        call    avg_ms
+        call    print_window
+        cmp     byte [opt_w], 0
+        je      .hint
+        mov     dx, msg_t_wrwin
+        call    puts
+        mov     ax, [ph1]
+        mov     dx, [ph1+2]
+        add     ax, [ph2]
+        adc     dx, [ph2+2]
+        add     ax, [ph5]
+        adc     dx, [ph5+2]
+        add     ax, [ph6]
+        adc     dx, [ph6+2]
+        call    avg_ms
+        call    print_window
+.hint:
+        mov     dx, msg_t_hint
+        call    puts
+        xor     al, al
+        jmp     exit
+
+tfail:                                  ; AH = error, SI -> failed step
+        push    ax
+        call    timer_restore
+        call    da_end
+        call    crlf
+        mov     dx, msg_t_step
+        call    puts
+        mov     ax, si
+        sub     ax, ph1
+        mov     cl, 3
+        shr     ax, cl
+        inc     ax
+        call    put_dec16
+        call    crlf
+        pop     ax
+        call    print_da_err
+        mov     al, 1
+        jmp     exit
+tfail0:                                 ; failure during setup
+        push    ax
+        call    da_end
+        pop     ax
+        call    print_da_err
+        mov     al, 1
+        jmp     exit
+
+t_setlba:
+        mov     ax, [arg1]
+        mov     dx, [arg1+2]
+        jmp     da_set_lba
+t_read8:
+        push    ds
+        pop     es
+        mov     ax, 0x0200|DA_NSEC
+        mov     bx, sec_buf
+        mov     cl, 1
+        jmp     da_data
+t_write8:
+        push    ds
+        pop     es
+        mov     ax, 0x0300|DA_NSEC
+        mov     bx, sec_buf
+        mov     cl, 1
+        jmp     da_data
+
+; find_data_lba: locate the card's FAT volume (MBR or superfloppy) and
+; return DX:AX = first sector of its data area + 64: a sector that is
+; either free space or ordinary file data, so writing back identical
+; bytes there is harmless. CF set on failure (AH = code).
+find_data_lba:
+        xor     ax, ax
+        xor     dx, dx
+        call    da_set_lba
+        jc      .out
+        call    .rd1
+        jc      .out
+        xor     ax, ax                  ; assume superfloppy: volume at 0
+        xor     dx, dx
+        cmp     word [sec_buf+0x0B], SEC_SZ
+        jne     .mbr
+        cmp     byte [sec_buf+0x15], 0xF0
+        jae     .vol
+.mbr:   mov     si, sec_buf+0x1BE
+        mov     cx, 4
+.part:  mov     al, [si+4]
+        cmp     al, 0x01
+        je      .found
+        cmp     al, 0x04
+        je      .found
+        cmp     al, 0x06
+        je      .found
+        cmp     al, 0x0B
+        je      .found
+        cmp     al, 0x0C
+        je      .found
+        cmp     al, 0x0E
+        je      .found
+        add     si, 16
+        loop    .part
+        mov     ah, 0xFD                ; no FAT volume on the card
+        stc
+        ret
+.found: mov     ax, [si+8]
+        mov     dx, [si+10]
+        push    ax
+        push    dx
+        call    da_set_lba
+        pop     dx
+        pop     ax
+        jc      .out
+        push    ax
+        push    dx
+        call    .rd1
+        pop     dx
+        pop     ax
+        jc      .out
+.vol:   cmp     word [sec_buf+0x0B], SEC_SZ
+        jne     .badvbr
+        add     ax, [sec_buf+0x0E]      ; reserved sectors
+        adc     dx, 0
+        push    ax
+        mov     ax, [sec_buf+0x11]      ; root entries * 32 / 512
+        mov     cl, 4
+        shr     ax, cl
+        mov     bx, ax
+        pop     ax
+        add     ax, bx
+        adc     dx, 0
+        mov     bx, [sec_buf+0x16]      ; FAT size (FAT12/16)
+        xor     cx, cx
+        or      bx, bx
+        jnz     .fats
+        mov     bx, [sec_buf+0x24]      ; FAT32 size
+        mov     cx, [sec_buf+0x26]
+.fats:  push    cx
+        mov     cl, [sec_buf+0x10]      ; number of FATs
+        xor     ch, ch
+        pop     si                      ; SI = fatsz hi
+        jcxz    .badvbr
+.fat:   add     ax, bx
+        adc     dx, si
+        loop    .fat
+        add     ax, 64
+        adc     dx, 0
+        clc
+.out:   ret
+.badvbr:
+        mov     ah, 0xFC                ; unreadable volume boot record
+        stc
+        ret
+.rd1:   push    ds                      ; read 1 data sector into sec_buf
+        pop     es
+        mov     ax, 0x0201
+        mov     bx, sec_buf
+        mov     cl, 1
+        jmp     da_data
+
+; --- timing helpers -------------------------------------------------
+; The BIOS runs PIT channel 0 in mode 3 (square wave), whose count is
+; ambiguous within the 55 ms tick. Mode 2 keeps the 18.2 Hz interrupt
+; rate but counts 65536..1 once per tick, so ticks*65536 + (65536-count)
+; is a monotonic 1.19 MHz clock (Abrash's long-period Zen timer).
+timer_init:
+        mov     al, 0x34                ; ch0, lo/hi, mode 2, binary
+        out     0x43, al
+        xor     al, al
+        out     0x40, al
+        out     0x40, al
+        ret
+timer_restore:
+        mov     al, 0x36                ; back to mode 3
+        out     0x43, al
+        xor     al, al
+        out     0x40, al
+        out     0x40, al
+        ret
+
+; timer_read: DX:AX = current clock (ticks : 65536-count). Preserves all
+; other registers.
+timer_read:
+        push    bx
+        push    es
+        mov     ax, BDA_SEG
+        mov     es, ax
+        cli
+        xor     al, al                  ; latch channel 0
+        out     0x43, al
+        in      al, 0x40
+        mov     bl, al
+        in      al, 0x40
+        mov     bh, al                  ; BX = count
+        mov     al, 0x0A                ; OCW3: read IRR
+        out     0x20, al
+        in      al, 0x20
+        mov     dx, [es:BDA_TICKS]
+        sti
+        neg     bx                      ; 65536 - count
+        test    al, 1                   ; IRQ0 pending = tick wrapped but
+        jz      .ok                     ; the counter not yet bumped
+        cmp     bx, 0x8000
+        jae     .ok
+        inc     dx
+.ok:    mov     ax, bx
+        pop     es
+        pop     bx
+        ret
+
+tm_start:
+        push    ax
+        push    dx
+        call    timer_read
+        mov     [ts], ax
+        mov     [ts+2], dx
+        pop     dx
+        pop     ax
+        ret
+
+; tm_end: SI -> record {sum dd, max dd}. Preserves AX and the flags.
+tm_end:
+        pushf
+        push    ax
+        push    dx
+        call    timer_read
+        sub     ax, [ts]
+        sbb     dx, [ts+2]
+        add     [si], ax
+        adc     [si+2], dx
+        cmp     dx, [si+6]
+        jb      .done
+        ja      .max
+        cmp     ax, [si+4]
+        jbe     .done
+.max:   mov     [si+4], ax
+        mov     [si+6], dx
+.done:  pop     dx
+        pop     ax
+        popf
+        ret
+
+; div32: DX:AX / CX -> DX:AX quotient, BX remainder.
+div32:
+        push    si
+        mov     si, ax
+        mov     ax, dx
+        xor     dx, dx
+        div     cx                      ; AX = hi quotient
+        mov     bx, ax
+        mov     ax, si
+        div     cx                      ; AX = lo quotient, DX = remainder
+        xchg    bx, dx                  ; DX = hi quotient, BX = remainder
+        pop     si
+        ret
+
+; avg_ms: DX:AX = sum of T_ITER samples in PIT units -> DX:AX in ms.
+avg_ms:
+        mov     cx, 4                   ; / T_ITER (16)
+.s:     shr     dx, 1
+        rcr     ax, 1
+        loop    .s
+        mov     cx, PIT_PER_MS
+        jmp     div32
+
+; print_rec: BX -> record; prints "avg / max ms".
+print_rec:
+        push    bx
+        mov     ax, [bx]
+        mov     dx, [bx+2]
+        call    avg_ms                  ; (div32 clobbers BX)
+        call    put_dec32
+        mov     dx, msg_slash
+        call    puts
+        pop     bx
+        mov     ax, [bx+4]
+        mov     dx, [bx+6]
+        mov     cx, PIT_PER_MS
+        call    div32
+        call    put_dec32
+        mov     dx, msg_ms
+        call    puts
+        ret
+
+; print_window: DX:AX = ms per 4KB window -> "nnn ms = nn.n KB/s".
+print_window:
+        push    ax
+        call    put_dec32
+        mov     dx, msg_ms_eq
+        call    puts
+        pop     cx
+        or      cx, cx
+        jz      .inst
+        mov     ax, 40000               ; 4KB in ms -> KB/s x10
+        xor     dx, dx
+        div     cx
+        mov     cx, 10
+        xor     dx, dx
+        div     cx
+        push    dx
+        call    put_dec16
+        mov     al, '.'
+        call    putc
+        pop     ax
+        call    put_dec16
+        mov     dx, msg_kbs
+        call    puts
+        ret
+.inst:  mov     dx, msg_inst
+        call    puts
+        ret
+
+; ---------------------------------------------------------------------
 exit:
         mov     ah, 0x4C
         int     0x21
@@ -372,11 +853,18 @@ parse_args:
         and     al, 0xDF                ; upcase
         cmp     al, 'U'
         je      .unit
+        cmp     al, 'W'
+        je      .write_ok
         mov     [mode], al
         cmp     al, 'L'
         je      .one_arg
+        cmp     al, 'T'
+        je      .one_arg
         cmp     al, 'C'
         je      .two_args
+        jmp     .scan
+.write_ok:
+        mov     byte [opt_w], 1
         jmp     .scan
 .unit:
         call    parse_dec32
@@ -402,7 +890,8 @@ parse_args:
         ret
 
 ; parse_dec32: skip non-digits then parse a 32-bit decimal into [num].
-; SI advances past the number.
+; SI advances past the number. Stops (leaving 0) at the next switch, so
+; an optional argument may be omitted: "/T /W".
 parse_dec32:
         xor     ax, ax
         mov     [num], ax
@@ -411,6 +900,8 @@ parse_dec32:
         lodsb
         cmp     al, 0x0D
         je      .end
+        cmp     al, '/'
+        je      .stop
         cmp     al, '0'
         jb      .skip
         cmp     al, '9'
@@ -515,6 +1006,30 @@ put_dec16:                              ; AX = word
         pop     bx
         ret
 
+put_dec32:                              ; DX:AX = dword
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        mov     word [dcount], 0
+.div:   mov     cx, 10
+        call    div32                   ; DX:AX /= 10, BX = digit
+        push    bx
+        inc     word [dcount]
+        mov     cx, ax
+        or      cx, dx
+        jnz     .div
+.emit:  pop     ax
+        add     al, '0'
+        call    putc
+        dec     word [dcount]
+        jnz     .emit
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+
 ; ---------------------------------------------------------------------
 %include "da.asm"
 
@@ -526,6 +1041,26 @@ arg2:       dw 0
 t0:         dw 0
 cur_lba:    dd 0
 want_cmdcnt: db 0
+
+; /T state
+opt_w:      db 0                        ; /W: include the write-back steps
+ts:         dd 0                        ; step start time
+t_iter:     dw 0
+t_lbaok:    db 0
+t_badlba:   dw 0                        ; status showed a different lba_base
+t_badwr:    dw 0                        ; write_cnt did not advance by 8
+want_wrcnt: db 0
+dcount:     dw 0
+ph1:        dd 0, 0                     ; {sum, max} in PIT units
+ph2:        dd 0, 0
+ph3:        dd 0, 0
+ph4:        dd 0, 0
+ph5:        dd 0, 0
+ph6:        dd 0, 0
+ph7:        dd 0, 0
+ph8:        dd 0, 0
+ph_table:   dw msg_p1, ph1, msg_p2, ph2, msg_p3, ph3, msg_p4, ph4
+            dw msg_p5, ph5, msg_p6, ph6, msg_p7, ph7, msg_p8, ph8
 
 msg_probing: db 'GotekHDD DAPING 0.1 - probing Direct Access track...', 13, 10, '$'
 msg_fixups: db 'BIOS fixups   : $'
@@ -548,5 +1083,30 @@ msg_ticks:  db 'Elapsed ticks : $'
 msg_rate:   db 'Read rate     : $'
 msg_kbs:    db ' KB/s', 13, 10, '$'
 msg_crlf:   db 13, 10, '$'
+
+msg_t_head: db 'DA step timing, 16 iterations at card LBA $'
+msg_t_head2: db ' (avg / max ms)', 13, 10, '$'
+msg_p1:     db ' 1 SET_LBA cmd write, random phase : $'
+msg_p2:     db ' 2 status read after cmd write     : $'
+msg_p3:     db ' 3 read 8 after status read        : $'
+msg_p4:     db ' 4 status read after read 8        : $'
+msg_p5:     db ' 5 write 8 after status read       : $'
+msg_p6:     db ' 6 status read after write 8       : $'
+msg_p7:     db ' 7 SET_LBA cmd write after status  : $'
+msg_p8:     db ' 8 read 8 after cmd write          : $'
+msg_slash:  db ' / $'
+msg_ms:     db ' ms', 13, 10, '$'
+msg_ms_eq:  db ' ms = $'
+msg_inst:   db 'instant (emulator?)', 13, 10, '$'
+msg_skipped: db 'skipped (add /W to write back the bytes read)', 13, 10, '$'
+msg_t_retry: db 'INT 13h retries: $'
+msg_t_badlba: db '   lba_base mismatches: $'
+msg_t_badwr: db '   write_cnt mismatches: $'
+msg_t_rdwin: db 'driver READ window  (1+8+4)   : $'
+msg_t_wrwin: db 'driver WRITE window (1+2+5+6) : $'
+msg_t_hint: db 'One revolution is ~200 ms (9 sectors of ~22 ms). A step that costs'
+            db 13, 10, '~200 ms more than its sector count needs missed its sector and'
+            db 13, 10, 'waited a full turn.', 13, 10, '$'
+msg_t_step: db 'failed at step $'
 
 sec_buf:    times SEC_SZ*DA_NSEC db 0

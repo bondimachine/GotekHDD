@@ -76,10 +76,17 @@ DRVTEST, not with a DOS-mounted GotekHDD drive.
 2. `DAPING /M` — note which fixup rows PASS on your BIOS.
 3. `DAPING /L 0` — dumps the card's MBR through the DA window.
 4. `DAPING /B` — read throughput (each dot is one 4KB window).
-5. `DRVTEST` / `DRVTEST /S 0 /N 2048` — full driver logic without
+5. `DAPING /T /W` — millisecond timing of every INT 13h step in a DA
+   window (command write, status reads, 8-sector read and write), 16
+   iterations on one card LBA, plus retry and verification counters.
+   `/W` writes back the very bytes just read, so it is safe; without
+   it only the read-side steps run. Any step costing ~200 ms more than
+   its sector count needs (22 ms per sector) missed its sector and
+   waited a full revolution — that is where the time goes.
+6. `DRVTEST` / `DRVTEST /S 0 /N 2048` — full driver logic without
    mounting (compare the checksum with `test/verify-sum.py`).
-6. `DEVICE=GOTEKHDD.SYS` in CONFIG.SYS, reboot, `DIR` the new drive.
-7. Interleave: `DIR A:` then the new drive again — both must keep
+7. `DEVICE=GOTEKHDD.SYS` in CONFIG.SYS, reboot, `DIR` the new drive.
+8. Interleave: `DIR A:` then the new drive again — both must keep
    working.
 
 ## Performance
