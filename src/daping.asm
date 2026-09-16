@@ -832,14 +832,17 @@ print_window:
 ; setup_winbuf: choose the window transfer buffer. A window is up to 32KB
 ; and INT 13h DMA cannot cross a 64KB physical boundary (BIOS error 09h),
 ; which an in-segment buffer at a random load address would hit 25-50%
-; of the time. Use the first 64KB-aligned paragraph above our segment;
-; DOS gives a .COM all remaining memory, so it is ours unless the
-; machine is nearly out of memory (PSP:2 = first paragraph past our
-; block), in which case bail out clearly rather than fail mysteriously.
+; of the time. Use the first 64KB-aligned paragraph at or beyond the END
+; of our own 64KB segment: the next boundary above CS is almost always
+; inside our segment, and a buffer there overwrites the .COM stack at
+; the top of the segment (garbage output, then a crash). DOS gives a
+; .COM all remaining memory, so the region is ours unless the machine
+; is nearly out of memory (PSP:2 = first paragraph past our block), in
+; which case bail out clearly rather than fail mysteriously.
 setup_winbuf:
         mov     ax, cs
-        add     ax, 0x1000
-        and     ax, 0xF000
+        add     ax, 0x1000 + 0x0FFF     ; past our segment, round up to
+        and     ax, 0xF000              ; the 64KB boundary
         mov     [win_seg], ax
         add     ax, (SEC_SZ*DA_WIN_MAX)/16
         cmp     ax, [0x0002]
