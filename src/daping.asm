@@ -866,7 +866,8 @@ print_rec:
         call    puts
         ret
 
-; print_window: DX:AX = ms per 4KB window -> "nnn ms = nn.n KB/s".
+; print_window: DX:AX = ms per window of [da_nsec] sectors
+; -> "nnn ms = nn.n KB/s".
 print_window:
         push    ax
         call    put_dec32
@@ -875,9 +876,15 @@ print_window:
         pop     cx
         or      cx, cx
         jz      .inst
-        mov     ax, 40000               ; 4KB in ms -> KB/s x10
-        xor     dx, dx
-        div     cx
+        ; KB/s x10 = (nsec*512/1024) * 10 * 1000 / ms = nsec*5000 / ms.
+        ; 32-bit dividend: 64 sectors is 320000.
+        mov     al, [da_nsec]
+        xor     ah, ah
+        mov     dx, 5000
+        mul     dx                      ; DX:AX = nsec*5000
+        push    bx
+        call    div32                   ; DX:AX = / ms (clobbers BX)
+        pop     bx
         mov     cx, 10
         xor     dx, dx
         div     cx
@@ -1234,9 +1241,11 @@ msg_t_badlba: db '   lba_base mismatches: $'
 msg_t_badwr: db '   write_cnt mismatches: $'
 msg_t_rdwin: db 'driver READ window  (1+8)  : $'
 msg_t_wrwin: db 'driver WRITE window (1+10) : $'
-msg_t_hint: db 'One revolution is ~200 ms (9 sectors of ~22 ms). A step that costs'
-            db 13, 10, '~200 ms more than its sector count needs missed its sector and'
-            db 13, 10, 'waited a full turn.', 13, 10, '$'
+msg_t_hint: db 'A sector is ~22 ms; the DA track is window+1 sectors long, so one'
+            db 13, 10, 'revolution is ~200 ms at window 8 and ~700 ms at 32. A step'
+            db 13, 10, 'costing a revolution more than its sectors need waited a full'
+            db 13, 10, 'turn: normal for the status-read steps, which wait for sector 0.'
+            db 13, 10, '$'
 msg_t_step: db 'failed at step $'
 msg_t_took: db ', that attempt took $'
 msg_t_took2: db ' ms, failed INT 13h attempts: $'

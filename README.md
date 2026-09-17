@@ -83,14 +83,17 @@ DRVTEST, not with a DOS-mounted GotekHDD drive.
    window (command write, status reads, 8-sector read and write), 16
    iterations on one card LBA, plus retry and verification counters.
    `/W` writes back the very bytes just read, so it is safe; without
-   it only the read-side steps run. Any step costing ~200 ms more than
-   its sector count needs (22 ms per sector) missed its sector and
-   waited a full revolution — that is where the time goes. Steps 8 and
-   10 are the driver's actual read and write transitions; the
-   status-read steps are turnaround diagnostics. Add `/N=n` to time the
-   window the driver will use, and `/1` to disable retries so a failure
-   reports its first error code and duration instead of the aftermath
-   of a recalibrate.
+   it only the read-side steps run. The DA track is window+1 sectors
+   of ~22 ms, so a revolution is ~200 ms at `/N=8` and ~700 ms at
+   `/N=32`; a step costing a revolution more than its sectors need
+   waited a full turn. That is normal for the status-read steps, which
+   wait for sector 0 to come round, and for step 1 when it follows one.
+   Steps 8 and 10 are the driver's actual read and write transfers and
+   the two `driver ... window` lines at the end are what the driver
+   would see; the status-read steps are turnaround diagnostics. Add
+   `/N=n` to time the window the driver will use, and `/1` to disable
+   retries so a failure reports its first error code and duration
+   instead of the aftermath of a recalibrate.
 6. `DRVTEST` / `DRVTEST /S 0 /N 2048` — full driver logic without
    mounting (compare the checksum with `test/verify-sum.py`).
 7. `DEVICE=GOTEKHDD.SYS` in CONFIG.SYS, reboot, `DIR` the new drive.
@@ -118,7 +121,15 @@ KB/s writes at large windows; through the PC BIOS expect somewhat less.
 There is no status-sector readback per transfer: one command, one
 multi-sector transfer, done. INT 13h still reports FDC-level errors and
 the driver retries them; `DAPING /T /W` is the write-integrity check to
-run during bring-up. It is a real hard drive: `DIR`, `COPY`, `CHKDSK`,
+run during bring-up.
+
+Writes depend on the firmware. Stock FlashFloppy writes each DA sector
+to storage as it arrives; on an SD card over SPI the card's busy time
+after each single-block write stalls the track and the FDC loses a full
+revolution per sector, so writes crawl at ~2 KB/s whatever the window.
+The pico2 port buffers the window in RAM and flushes it as one
+multi-block write (see its `RP2350.md`), so writes run at the same bus
+speed as reads there. It is a real hard drive: `DIR`, `COPY`, `CHKDSK`,
 running programs — everything works.
 
 ## How it works
