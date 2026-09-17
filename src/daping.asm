@@ -220,7 +220,9 @@ do_lba:
         mov     al, 1
         jmp     exit
 .fail:
+        push    ax                      ; da_end zeroes AH: keep the code
         call    da_end
+        pop     ax
         call    print_da_err
         mov     al, 1
         jmp     exit
@@ -315,7 +317,9 @@ do_bench:
 bench_fail_pop:
         pop     cx
 bench_fail:
+        push    ax                      ; da_end zeroes AH: keep the code
         call    da_end
+        pop     ax
         call    print_da_err
         mov     al, 1
         jmp     exit
@@ -355,7 +359,9 @@ do_setcyl:
         mov     al, 1
         jmp     exit
 .fail:
+        push    ax                      ; da_end zeroes AH: keep the code
         call    da_end
+        pop     ax
         call    print_da_err
         mov     al, 1
         jmp     exit
