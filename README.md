@@ -51,9 +51,8 @@ check that your BIOS can reach the Direct Access track at all, and
 fixups your machine needs if the plain probe fails.
 
 Firmware-side requirements: FlashFloppy in Shugart-target firmware with
-a FAT16/FAT32 SD card (Direct Access is unavailable on the pico2's
-internal littlefs store), and `MAX-CYL` in `FF.CFG` left at its default
-of 255 — the escape mechanism is literally a seek to cylinder 255.
+a FAT16/FAT32 SD card, and `MAX-CYL` in `FF.CFG` left at its default
+of 255 — the escape mechanism is literally a seek to cylinder 255. 
 
 ### 8088/XT machines
 
@@ -122,15 +121,6 @@ There is no status-sector readback per transfer: one command, one
 multi-sector transfer, done. INT 13h still reports FDC-level errors and
 the driver retries them; `DAPING /T /W` is the write-integrity check to
 run during bring-up.
-
-Writes depend on the firmware. Stock FlashFloppy writes each DA sector
-to storage as it arrives; on an SD card over SPI the card's busy time
-after each single-block write stalls the track and the FDC loses a full
-revolution per sector, so writes crawl at ~2 KB/s whatever the window.
-The pico2 port buffers the window in RAM and flushes it as one
-multi-block write (see its `RP2350.md`), so writes run at the same bus
-speed as reads there. It is a real hard drive: `DIR`, `COPY`, `CHKDSK`,
-running programs — everything works.
 
 ## How it works
 
